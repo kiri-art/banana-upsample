@@ -1,39 +1,33 @@
-# Must use a Cuda version 11+
-FROM pytorch/pytorch:1.11.0-cuda11.3-cudnn8-runtime
+#FROM nvidia/cuda:11.6.2-cudnn8-devel-ubuntu20.04
+FROM nvidia/cudagl:11.4.1-runtime-ubuntu20.04
 
 WORKDIR /
 
-# Install git
-RUN apt-get update && apt-get install -y git
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=TZ=Etc/UTC
+RUN apt-get update && apt-get install -y \
+  git apt-utils python3-pip libgl1-mesa-glx libglib2.0-0
 
 # Install python packages
-RUN pip3 install --upgrade pip
+# RUN pip3 install --upgrade pip
 ADD requirements.txt requirements.txt
 RUN pip3 install -r requirements.txt
+
+RUN git clone https://github.com/xinntao/Real-ESRGAN.git
+RUN cd Real-ESRGAN && pip3 install -r requirements.txt && python3 setup.py develop
 
 # We add the banana boilerplate here
 ADD server.py .
 EXPOSE 8000
 
-# Dev: docker build --build-arg HF_AUTH_TOKEN=${HF_AUTH_TOKEN} ...
-# Banana: currently, comment out ARG and set by hand ENV line.
-ARG HF_AUTH_TOKEN
-ENV HF_AUTH_TOKEN=${HF_AUTH_TOKEN}
+ADD models.py .
 
-# Which model to download and use; fork / downstream specific.
-ADD DOWNLOAD_VARS.py .
-
-# Add your model weight files 
-# (in this case we have a python script)
-ADD loadModel.py .
+#COPY weights weights
 ADD download.py .
 RUN python3 download.py
 
 # Add your custom app code, init() and inference()
 ADD send.py .
 ADD app.py .
-
-# Runtime vars (for init and inference); fork / downstream specific.
-ADD APP_VARS.py .
 
 CMD python3 -u server.py

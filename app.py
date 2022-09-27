@@ -1,96 +1,74 @@
-from sched import scheduler
-import torch
-from torch import autocast
-from diffusers import (
-    pipelines as _pipelines,
-    LMSDiscreteScheduler,
-    DDIMScheduler,
-    PNDMScheduler,
-)
 import base64
 from io import BytesIO
 import PIL
 import json
-from loadModel import loadModel
-from send import send
 import os
+import cv2
+import numpy as np
+from basicsr.archs.rrdbnet_arch import RRDBNet
+from realesrgan import RealESRGANer
+from realesrgan.archs.srvgg_arch import SRVGGNetCompact
+from gfpgan import GFPGANer
+from models import upsamplers, face_enhancers
+from send import send
 
-from APP_VARS import MODEL_ID
-
-PIPELINES = [
-    "StableDiffusionPipeline",
-    "StableDiffusionImg2ImgPipeline",
-    "StableDiffusionInpaintPipeline",
-]
-
-SCHEDULERS = ["LMS", "DDIM", "PNDM"]
-
-
-def createPipelinesFromModel(MODEL: str):
-    global model
-    pipelines = dict()
-    for pipeline in PIPELINES:
-        pipelines[pipeline] = getattr(_pipelines, pipeline)(
-            vae=model.vae,
-            text_encoder=model.text_encoder,
-            tokenizer=model.tokenizer,
-            unet=model.unet,
-            scheduler=model.scheduler,
-            safety_checker=model.safety_checker,
-            feature_extractor=model.feature_extractor,
-        )
-    return pipelines
-
-
-class DummySafetyChecker:
-    @staticmethod
-    def __call__(images, clip_input):
-        return images, False
-
+nets = {
+    "RRDBNet": RRDBNet,
+    "SRVGGNetCompact": SRVGGNetCompact,
+}
 
 # Init is ran on server startup
 # Load your model to GPU as a global variable here using the variable name "model"
 def init():
-    global model  # needed for bananna optimizations
-    global pipelines
-    global schedulers
-    global dummy_safety_checker
+
+    # global model  # needed for bananna optimizations
+    global models
+    global face_enhancer
 
     send(
         "init",
         "start",
         {
-            "device": torch.cuda.get_device_name(),
+            # "device": torch.cuda.get_device_name(),
             "hostname": os.getenv("HOSTNAME"),
-            "model_id": MODEL_ID,
+            # "model_id": MODEL_ID,
         },
         True,
     )
 
-    schedulers = {
-        "LMS": LMSDiscreteScheduler(
-            beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear"
-        ),
-        "DDIM": DDIMScheduler(
-            beta_start=0.00085,
-            beta_end=0.012,
-            beta_schedule="scaled_linear",
-            clip_sample=False,
-            set_alpha_to_one=False,
-        ),
-        "PNDM": PNDMScheduler(),
-    }
+    ## TODO, DNI
+    ## https://github.com/xinntao/Real-ESRGAN/blob/master/inference_realesrgan.py#L99
 
-    dummy_safety_checker = DummySafetyChecker()
+    models = upsamplers
+    for model_key in models:
+        print("Init " + model_key)
+        model = models[model_key]
+        modelModel = nets[model["net"]](**model["initArgs"])
+        upsampler = RealESRGANer(
+            scale=model["netscale"],
+            model_path=model["path"],
+            dni_weight=None,
+            model=modelModel,
+            tile=0,
+            tile_pad=10,
+            pre_pad=0,
+            half=True,
+        )
+        model.update(
+            {
+                "model": modelModel,
+                "upsampler": upsampler,
+            }
+        )
 
-    if MODEL_ID == "ALL":
-        global last_model_id
-        last_model_id = None
-        return
-
-    model = loadModel(MODEL_ID)
-
-    pipelines = createPipelinesFromModel(MODEL_ID)
+    print("Init GFPGan")
+    face_enhancer = GFPGANer(
+        model_path=face_enhancers["GFPGAN"]["path"],
+        upscale=4,  # args.outscale,
+        arch="clean",
+        channel_multiplier=2,
+        bg_upsampler=upsampler,
+    )
 
     send("init", "done")
 
@@ -103,7 +81,7 @@ def truncateInputs(inputs: dict):
     clone = inputs.copy()
     if "modelInputs" in clone:
         modelInputs = clone["modelInputs"] = clone["modelInputs"].copy()
-        for item in ["init_image", "mask_image"]:
+        for item in ["input_image"]:
             if item in modelInputs:
                 modelInputs[item] = modelInputs[item][0:6] + "..."
     return clone
@@ -112,84 +90,57 @@ def truncateInputs(inputs: dict):
 # Inference is ran for every server call
 # Reference your preloaded global model variable here.
 def inference(all_inputs: dict) -> dict:
-    global model
-    global pipelines
-    global last_model_id
-    global schedulers
-    global dummy_safety_checker
+    # global model
+    global models
+    global face_enhancer
 
     print(json.dumps(truncateInputs(all_inputs), indent=2))
     model_inputs = all_inputs.get("modelInputs", None)
     call_inputs = all_inputs.get("callInputs", None)
     startRequestId = call_inputs.get("startRequestId", None)
 
-    # Fallback until all clients on new code
-    if model_inputs == None:
-        return {"$error": "UPGRADE CLIENT - no model_inputs specified"}
-
     model_id = call_inputs.get("MODEL_ID")
-    if MODEL_ID == "ALL":
-        if last_model_id != model_id:
-            model = loadModel(model_id)
-            pipelines = createPipelinesFromModel(model_id)
-            last_model_id = model_id
-    else:
-        if model_id != MODEL_ID:
-            return {
-                "$error": {
-                    "code": "MODEL_MISMATCH",
-                    "message": f'Model "{model_id}" not available on this container which hosts "{MODEL_ID}"',
-                    "requested": model_id,
-                    "available": MODEL_ID,
-                }
+    if models.get(model_id, "None") == None:
+        return {
+            "$error": {
+                "code": "MISSING_MODEL",
+                "message": f'Model "{model_id}" not available on this container.',
+                "requested": model_id,
+                # "available": MODEL_ID,
             }
+        }
 
-    pipeline = pipelines.get(call_inputs.get("PIPELINE"))
+    # TODO, face enhancer
+    upsampler = models[model_id]["upsampler"]
 
-    pipeline.scheduler = schedulers.get(call_inputs.get("SCHEDULER"))
+    if "input_image" not in model_inputs:
+        return {
+            "$error": {
+                "code": "NO_INPUT_IMAGE",
+                "message": "Missing required parameter `input_image`",
+            }
+        }
 
-    safety_checker = call_inputs.get("safety_checker", True)
-    pipeline.safety_checker = (
-        model.safety_checker if safety_checker else dummy_safety_checker
-    )
-
-    # Parse out your arguments
-    # prompt = model_inputs.get("prompt", None)
-    # if prompt == None:
-    #     return {"message": "No prompt provided"}
-    #
-    #   height = model_inputs.get("height", 512)
-    #  width = model_inputs.get("width", 512)
-    # num_inference_steps = model_inputs.get("num_inference_steps", 50)
-    # guidance_scale = model_inputs.get("guidance_scale", 7.5)
-    # seed = model_inputs.get("seed", None)
-    #   strength = model_inputs.get("strength", 0.75)
-
-    if "init_image" in model_inputs:
-        model_inputs["init_image"] = decodeBase64Image(model_inputs.get("init_image"))
-
-    if "mask_image" in model_inputs:
-        model_inputs["mask_image"] = decodeBase64Image(model_inputs.get("mask_image"))
-
-    seed = model_inputs.get("seed", None)
-    if seed == None:
-        generator = torch.Generator(device="cuda")
-        generator.seed()
-    else:
-        generator = torch.Generator(device="cuda").manual_seed(seed)
-        del model_inputs["seed"]
-
-    model_inputs.update({"generator": generator})
+    # image = decodeBase64Image(model_inputs.get("input_image"))
+    image_str = base64.b64decode(model_inputs["input_image"])
+    image_np = np.frombuffer(image_str, dtype=np.uint8)
+    # bytes = BytesIO(base64.decodebytes(bytes(model_inputs["input_image"], "utf-8")))
+    img = cv2.imdecode(image_np, cv2.IMREAD_UNCHANGED)
 
     send("inference", "start", {"startRequestId": startRequestId}, True)
 
     # Run the model
-    with autocast("cuda"):
-        image = pipeline(**model_inputs).images[0]
+    # with autocast("cuda"):
+    #    image = pipeline(**model_inputs).images[0]
+    # if args.face_enhance:
+    #            _, _, output = face_enhancer.enhance(img, has_aligned=False, only_center_face=False, paste_back=True)
+    #        else:
+    #            output, _ = upsampler.enhance(img, outscale=args.outscale)
+    output, rgb = upsampler.enhance(img, outscale=4)  # TODO
 
-    buffered = BytesIO()
-    image.save(buffered, format="JPEG")
-    image_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    # _, buffer = cv2.imencode(".jpg", output)
+    # image_base64 = base64.b64encode(buffer)
+    image_base64 = base64.b64encode(cv2.imencode(".jpg", output)[1]).decode()
 
     send("inference", "done", {"startRequestId": startRequestId})
 

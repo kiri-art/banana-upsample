@@ -24,8 +24,10 @@ def output_path(filename: str):
 def test(name, json):
     print("Running test: " + name)
     res = requests.post("http://localhost:8000/", json=json)
+    json = res.json()
+    print(json)
 
-    image_byte_string = res.json()["image_base64"]
+    image_byte_string = json["image_base64"]
 
     image_encoded = image_byte_string.encode("utf-8")
     image_bytes = BytesIO(base64.b64decode(image_encoded))
@@ -37,44 +39,11 @@ def test(name, json):
 
 
 test(
-    "txt2img",
-    {
-        "modelInputs": {"prompt": "realistic field of grass"},
-        "callInputs": {
-            "MODEL_ID": "CompVis/stable-diffusion-v1-4",
-            "PIPELINE": "StableDiffusionPipeline",
-            "SCHEDULER": "LMS",
-        },
-    },
-)
-
-test(
-    "img2img",
+    "RealESRGAN_x4plus_anime_6B",
     {
         "modelInputs": {
-            "prompt": "A fantasy landscape, trending on artstation",
-            "init_image": b64encode_file("sketch-mountains-input.jpg"),
+            "input_image": b64encode_file("Anime_Girl.svg.png"),
         },
-        "callInputs": {
-            "MODEL_ID": "CompVis/stable-diffusion-v1-4",
-            "PIPELINE": "StableDiffusionImg2ImgPipeline",
-            "SCHEDULER": "LMS",
-        },
-    },
-)
-
-test(
-    "inpaint",
-    {
-        "modelInputs": {
-            "prompt": "a cat sitting on a bench",
-            "init_image": b64encode_file("overture-creations-5sI6fQgYIuo.png"),
-            "mask_image": b64encode_file("overture-creations-5sI6fQgYIuo_mask.png"),
-        },
-        "callInputs": {
-            "MODEL_ID": "CompVis/stable-diffusion-v1-4",
-            "PIPELINE": "StableDiffusionInpaintPipeline",
-            "SCHEDULER": "DDIM",  # Note, as of diffusers 0.3.0, no LMS yet
-        },
+        "callInputs": {"MODEL_ID": "RealESRGAN_x4plus_anime_6B"},
     },
 )
