@@ -36,9 +36,6 @@ def init():
         True,
     )
 
-    ## TODO, DNI
-    ## https://github.com/xinntao/Real-ESRGAN/blob/master/inference_realesrgan.py#L99
-
     models = upsamplers
     for model_key in models:
         print("Init " + model_key)
@@ -110,12 +107,23 @@ def inference(all_inputs: dict) -> dict:
             }
         }
 
-    # TODO, face enhancer
     upsampler = models[model_id]["upsampler"]
 
     face_enhance = model_inputs.get("face_enhance", False)
     if face_enhance:  # Use GFPGAN for face enhancement
         face_enhancer.bg_upsampler = upsampler
+
+    # TODO... download this model too, switch as needed
+    # https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-wdn-x4v3.pth
+    if model_id == "realesr-general-x4v3":
+        denoise_strength = model_inputs.get("denoise_strength", 1)
+        if denoise_strength != 1:
+            # wdn_model_path = model_path.replace('realesr-general-x4v3', 'realesr-general-wdn-x4v3')
+            # model_path = [model_path, wdn_model_path]
+            # upsampler = models["realesr-general-x4v3-denoise"]
+            # upsampler.dni_weight = dni_weight
+            dni_weight = [denoise_strength, 1 - denoise_strength]
+            return "TODO: denoise_strength"
 
     if "input_image" not in model_inputs:
         return {
