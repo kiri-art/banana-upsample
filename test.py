@@ -47,3 +47,14 @@ test(
         "callInputs": {"MODEL_ID": "RealESRGAN_x4plus_anime_6B"},
     },
 )
+
+test(
+    "RealESRGAN_x4plus",
+    {
+        "modelInputs": {
+            "input_image": b64encode_file("Blake_Lively.jpg"),
+            "face_enhance": True,
+        },
+        "callInputs": {"MODEL_ID": "RealESRGAN_x4plus"},
+    },
+)

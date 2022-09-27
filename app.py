@@ -113,6 +113,10 @@ def inference(all_inputs: dict) -> dict:
     # TODO, face enhancer
     upsampler = models[model_id]["upsampler"]
 
+    face_enhance = model_inputs.get("face_enhance", False)
+    if face_enhance:  # Use GFPGAN for face enhancement
+        face_enhancer.bg_upsampler = upsampler
+
     if "input_image" not in model_inputs:
         return {
             "$error": {
@@ -132,14 +136,13 @@ def inference(all_inputs: dict) -> dict:
     # Run the model
     # with autocast("cuda"):
     #    image = pipeline(**model_inputs).images[0]
-    # if args.face_enhance:
-    #            _, _, output = face_enhancer.enhance(img, has_aligned=False, only_center_face=False, paste_back=True)
-    #        else:
-    #            output, _ = upsampler.enhance(img, outscale=args.outscale)
-    output, rgb = upsampler.enhance(img, outscale=4)  # TODO
+    if face_enhance:
+        _, _, output = face_enhancer.enhance(
+            img, has_aligned=False, only_center_face=False, paste_back=True
+        )
+    else:
+        output, _rgb = upsampler.enhance(img, outscale=4)  # TODO outscale param
 
-    # _, buffer = cv2.imencode(".jpg", output)
-    # image_base64 = base64.b64encode(buffer)
     image_base64 = base64.b64encode(cv2.imencode(".jpg", output)[1]).decode()
 
     send("inference", "done", {"startRequestId": startRequestId})
