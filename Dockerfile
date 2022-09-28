@@ -1,5 +1,6 @@
-FROM nvidia/cuda:11.6.2-cudnn8-devel-ubuntu20.04
+#FROM nvidia/cuda:11.6.2-cudnn8-devel-ubuntu20.04
 #FROM nvidia/cudagl:11.4.1-runtime-ubuntu20.04
+FROM pytorch/pytorch:1.11.0-cuda11.3-cudnn8-runtime
 
 WORKDIR /
 
@@ -14,7 +15,9 @@ ADD requirements.txt requirements.txt
 RUN pip3 install -r requirements.txt
 
 RUN git clone https://github.com/xinntao/Real-ESRGAN.git
-RUN cd Real-ESRGAN && pip3 install -r requirements.txt && python3 setup.py develop
+# we picked our own versions in our own requirements.txt
+# RUN cd Real-ESRGAN && pip3 install -r requirements.txt && python3 setup.py develop
+RUN cd Real-ESRGAN && python3 setup.py develop
 
 # We add the banana boilerplate here
 ADD server.py .
