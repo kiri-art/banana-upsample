@@ -21,9 +21,11 @@ nets = {
 # Load your model to GPU as a global variable here using the variable name "model"
 def init():
 
-    # global model  # needed for bananna optimizations
+    # needed for bananna optimizations
+    global model
+
     global models
-    global face_enhancer
+    # global face_enhancer
 
     send(
         "init",
@@ -67,6 +69,10 @@ def init():
         bg_upsampler=upsampler,
     )
 
+    # the models are all pretty small, just GFPGAN is about 5x the next
+    # biggest, so let's optimize that.
+    model = face_enhancer
+
     send("init", "done")
 
 
@@ -87,9 +93,12 @@ def truncateInputs(inputs: dict):
 # Inference is ran for every server call
 # Reference your preloaded global model variable here.
 def inference(all_inputs: dict) -> dict:
-    # global model
+    global model
     global models
-    global face_enhancer
+
+    # use optimized version
+    # global face_enhancer
+    face_enhancer = model
 
     print(json.dumps(truncateInputs(all_inputs), indent=2))
     model_inputs = all_inputs.get("modelInputs", None)
