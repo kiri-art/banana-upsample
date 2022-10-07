@@ -33,7 +33,9 @@ def init():
         "init",
         "start",
         {
-            "device": torch.cuda.get_device_name(),
+            "device": torch.cuda.get_device_name()
+            if torch.cuda.is_available()
+            else "cpu",
             "hostname": os.getenv("HOSTNAME"),
             # "model_id": MODEL_ID,
             "model_id": "(UPSAMPLE-opt)",
@@ -64,10 +66,12 @@ def init():
                 tile_pad=10,
                 pre_pad=0,
                 half=True,
+                device="cpu",
             )
             # upsampler.to(torch.device("cuda")) -- model init does it already
             print("Load time: {:.2f} s".format(time.time() - t))
             # print(upsampler.model.state_dict())
+            # model_scripted = torch.jit.script(upsampler.model)
             torch.save({"params": upsampler.model.state_dict()}, opt_path)
             print("Optimized: {:,} bytes".format(os.path.getsize(opt_path)))
             os.remove(model["path"])
