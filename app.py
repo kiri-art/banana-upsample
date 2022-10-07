@@ -5,6 +5,7 @@ import json
 import os
 import cv2
 import numpy as np
+import torch
 from basicsr.archs.rrdbnet_arch import RRDBNet
 from realesrgan import RealESRGANer
 from realesrgan.archs.srvgg_arch import SRVGGNetCompact
@@ -31,9 +32,10 @@ def init():
         "init",
         "start",
         {
-            # "device": torch.cuda.get_device_name(),
+            "device": torch.cuda.get_device_name(),
             "hostname": os.getenv("HOSTNAME"),
             # "model_id": MODEL_ID,
+            "model_id": "(UPSAMPLE-opt)",
         },
         True,
     )
