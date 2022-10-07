@@ -1,5 +1,6 @@
 import base64
 from io import BytesIO
+import time
 import PIL
 import json
 import os
@@ -23,10 +24,10 @@ nets = {
 def init():
 
     # needed for bananna optimizations
-    global model
+    # global model
 
     global models
-    # global face_enhancer
+    global face_enhancer
 
     send(
         "init",
@@ -45,9 +46,37 @@ def init():
         print("Init " + model_key)
         model = models[model_key]
         modelModel = nets[model["net"]](**model["initArgs"])
+        opt_path = "opt_" + model["path"]
+        if not os.path.exists(opt_path):
+            os.makedirs("opt_weights", exist_ok=True)
+            print(
+                "Optimizing "
+                + model["path"]
+                + " {:,} bytes".format(os.path.getsize(model["path"]))
+            )
+            t = time.time()
+            upsampler = RealESRGANer(
+                scale=model["netscale"],
+                model_path=model["path"],
+                dni_weight=None,
+                model=modelModel,
+                tile=0,
+                tile_pad=10,
+                pre_pad=0,
+                half=True,
+            )
+            # upsampler.to(torch.device("cuda")) -- model init does it already
+            print("Load time: {:.2f} s".format(time.time() - t))
+            # print(upsampler.model.state_dict())
+            torch.save({"params": upsampler.model.state_dict()}, opt_path)
+            print("Optimized: {:,} bytes".format(os.path.getsize(opt_path)))
+            os.remove(model["path"])
+
+        t = time.time()
+        print("Loading " + model["name"])
         upsampler = RealESRGANer(
             scale=model["netscale"],
-            model_path=model["path"],
+            model_path=opt_path,
             dni_weight=None,
             model=modelModel,
             tile=0,
@@ -55,6 +84,9 @@ def init():
             pre_pad=0,
             half=True,
         )
+        print("Load time: {:.2f} s".format(time.time() - t))
+        print()
+
         model.update(
             {
                 "model": modelModel,
@@ -62,14 +94,43 @@ def init():
             }
         )
 
+    # GFPGAN
+    model_path = face_enhancers["GFPGAN"]["path"]
+    opt_path = "opt_" + model_path
+    if not os.path.exists(opt_path):
+        os.makedirs("opt_weights", exist_ok=True)
+        print(
+            "Optimizing "
+            + model_path
+            + " {:,} bytes".format(os.path.getsize(model_path))
+        )
+        t = time.time()
+        print(model_path)
+        face_enhancer = GFPGANer(
+            model_path=model_path,
+            upscale=4,  # args.outscale,
+            arch="clean",
+            channel_multiplier=2,
+            bg_upsampler=upsampler,
+        )
+        # upsampler.to(torch.device("cuda")) -- model init does it already
+        print("Load time: {:.2f} s".format(time.time() - t))
+        # print(upsampler.model.state_dict())
+        torch.save({"params": face_enhancer.gfpgan.state_dict()}, opt_path)
+        print("Optimized: {:,} bytes".format(os.path.getsize(opt_path)))
+        os.remove(model_path)
+
     print("Init GFPGan")
+    t = time.time()
     face_enhancer = GFPGANer(
-        model_path=face_enhancers["GFPGAN"]["path"],
+        model_path=opt_path,
         upscale=4,  # args.outscale,
         arch="clean",
         channel_multiplier=2,
         bg_upsampler=upsampler,
     )
+    print("Load time: {:.2f} s".format(time.time() - t))
+    print()
 
     # the models are all pretty small, just GFPGAN is about 5x the next
     # biggest, so let's optimize that.
@@ -95,12 +156,12 @@ def truncateInputs(inputs: dict):
 # Inference is ran for every server call
 # Reference your preloaded global model variable here.
 def inference(all_inputs: dict) -> dict:
-    global model
+    # global model
     global models
 
     # use optimized version
-    # global face_enhancer
-    face_enhancer = model
+    global face_enhancer
+    # face_enhancer = model
 
     print(json.dumps(truncateInputs(all_inputs), indent=2))
     model_inputs = all_inputs.get("modelInputs", None)
@@ -168,3 +229,8 @@ def inference(all_inputs: dict) -> dict:
 
     # Return the results as a dictionary
     return {"image_base64": image_base64}
+
+
+if __name__ == "__main__":
+    # optimize models
+    init()
