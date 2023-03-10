@@ -7,22 +7,148 @@ import os
 import cv2
 import numpy as np
 import torch
+import re
 from basicsr.archs.rrdbnet_arch import RRDBNet
 from realesrgan import RealESRGANer
 from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 from gfpgan import GFPGANer
 from models import upsamplers, face_enhancers
 from send import send
+from safetensors.torch import save_file, load_file
 
 nets = {
     "RRDBNet": RRDBNet,
     "SRVGGNetCompact": SRVGGNetCompact,
 }
 
+device_id = "cuda" if torch.cuda.is_available() else "cpu"
+device = torch.device(device_id)
+print(device)
+
+OPTIMIZE = True if os.environ.get("OPTIMIZE", None) else False
+
+
+class RealESRGANer2(RealESRGANer):
+    def __init__(
+        self,
+        scale,
+        model_path,
+        dni_weight=None,
+        model=None,
+        tile=0,
+        tile_pad=10,
+        pre_pad=10,
+        half=False,
+        device=None,
+        # gpu_id="None",
+    ):
+        self.scale = scale
+        self.tile_size = tile
+        self.tile_pad = tile_pad
+        self.pre_pad = pre_pad
+        self.mod_scale = None
+        self.half = half
+
+        self.device = device
+        loadnet = load_file(model_path, device=device_id)
+        model.load_state_dict(loadnet, strict=True)
+
+        model.eval()
+        self.model = model.to(self.device)
+        if self.half:
+            self.model = self.model.half()
+
+
+from basicsr.utils import img2tensor, tensor2img
+from basicsr.utils.download_util import load_file_from_url
+from facexlib.utils.face_restoration_helper import FaceRestoreHelper
+from torchvision.transforms.functional import normalize
+from gfpgan.archs.gfpgan_bilinear_arch import GFPGANBilinear
+from gfpgan.archs.gfpganv1_arch import GFPGANv1
+from gfpgan.archs.gfpganv1_clean_arch import GFPGANv1Clean
+
+
+class GFPGANer2(GFPGANer):
+    def __init__(
+        self,
+        model_path,
+        upscale=2,
+        arch="clean",
+        channel_multiplier=2,
+        bg_upsampler=None,
+        device=None,
+    ):
+        self.upscale = upscale
+        self.bg_upsampler = bg_upsampler
+
+        self.device = device
+
+        # initialize the GFP-GAN
+        if arch == "clean":
+            self.gfpgan = GFPGANv1Clean(
+                out_size=512,
+                num_style_feat=512,
+                channel_multiplier=channel_multiplier,
+                decoder_load_path=None,
+                fix_decoder=False,
+                num_mlp=8,
+                input_is_latent=True,
+                different_w=True,
+                narrow=1,
+                sft_half=True,
+            )
+        elif arch == "bilinear":
+            self.gfpgan = GFPGANBilinear(
+                out_size=512,
+                num_style_feat=512,
+                channel_multiplier=channel_multiplier,
+                decoder_load_path=None,
+                fix_decoder=False,
+                num_mlp=8,
+                input_is_latent=True,
+                different_w=True,
+                narrow=1,
+                sft_half=True,
+            )
+        elif arch == "original":
+            self.gfpgan = GFPGANv1(
+                out_size=512,
+                num_style_feat=512,
+                channel_multiplier=channel_multiplier,
+                decoder_load_path=None,
+                fix_decoder=True,
+                num_mlp=8,
+                input_is_latent=True,
+                different_w=True,
+                narrow=1,
+                sft_half=True,
+            )
+        elif arch == "RestoreFormer":
+            from gfpgan.archs.restoreformer_arch import RestoreFormer
+
+            self.gfpgan = RestoreFormer()
+
+        # initialize face helper
+        self.face_helper = FaceRestoreHelper(
+            upscale,
+            face_size=512,
+            crop_ratio=(1, 1),
+            det_model="retinaface_resnet50",
+            save_ext="png",
+            use_parse=True,
+            device=self.device,
+            model_rootpath="gfpgan/weights",
+        )
+
+        loadnet = load_file(model_path, device=device_id)
+        self.gfpgan.load_state_dict(loadnet, strict=True)
+        self.gfpgan.eval()
+        self.gfpgan = self.gfpgan.to(self.device)
+
+
 # Init is ran on server startup
 # Load your model to GPU as a global variable here using the variable name "model"
 def init():
-
     # needed for bananna optimizations
     # global model
 
@@ -48,37 +174,42 @@ def init():
         print("Init " + model_key)
         model = models[model_key]
         modelModel = nets[model["net"]](**model["initArgs"])
-        opt_path = "opt_" + model["path"]
+        opt_path = re.sub(r".pth$", ".safetensors", model["path"])
+        RealESRGANerToUse = RealESRGANer2
         if not os.path.exists(opt_path):
-            os.makedirs("opt_weights", exist_ok=True)
-            print(
-                "Optimizing "
-                + model["path"]
-                + " {:,} bytes".format(os.path.getsize(model["path"]))
-            )
-            t = time.time()
-            upsampler = RealESRGANer(
-                scale=model["netscale"],
-                model_path=model["path"],
-                dni_weight=None,
-                model=modelModel,
-                tile=0,
-                tile_pad=10,
-                pre_pad=0,
-                half=True,
-                device="cpu",
-            )
-            # upsampler.to(torch.device("cuda")) -- model init does it already
-            print("Load time: {:.2f} s".format(time.time() - t))
-            # print(upsampler.model.state_dict())
-            # model_scripted = torch.jit.script(upsampler.model)
-            torch.save({"params": upsampler.model.state_dict()}, opt_path)
-            print("Optimized: {:,} bytes".format(os.path.getsize(opt_path)))
-            os.remove(model["path"])
+            if OPTIMIZE:
+                print(
+                    "Optimizing "
+                    + model["path"]
+                    + " {:,} bytes".format(os.path.getsize(model["path"]))
+                )
+                t = time.time()
+                upsampler = RealESRGANer(
+                    scale=model["netscale"],
+                    model_path=model["path"],
+                    dni_weight=None,
+                    model=modelModel,
+                    tile=0,
+                    tile_pad=10,
+                    pre_pad=0,
+                    half=True,
+                    device=device,
+                )
+                # upsampler.to(torch.device("cuda")) -- model init does it already
+                print("Load time: {:.2f} s".format(time.time() - t))
+                # print(upsampler.model.state_dict())
+                # model_scripted = torch.jit.script(upsampler.model)
+                # torch.save({"params": upsampler.model.state_dict()}, opt_path)
+                save_file(upsampler.model.state_dict(), opt_path)
+                print("Optimized: {:,} bytes".format(os.path.getsize(opt_path)))
+                os.remove(model["path"])
+            else:
+                opt_path = model["path"]
+                RealESRGANerToUse = RealESRGANer
 
         t = time.time()
         print("Loading " + model["name"])
-        upsampler = RealESRGANer(
+        upsampler = RealESRGANerToUse(
             scale=model["netscale"],
             model_path=opt_path,
             dni_weight=None,
@@ -87,7 +218,9 @@ def init():
             tile_pad=10,
             pre_pad=0,
             half=True,
+            device=device,
         )
+
         print("Load time: {:.2f} s".format(time.time() - t))
         print()
 
@@ -99,46 +232,52 @@ def init():
         )
 
     # GFPGAN
-    model_path = face_enhancers["GFPGAN"]["path"]
-    opt_path = "opt_" + model_path
-    if not os.path.exists(opt_path):
-        os.makedirs("opt_weights", exist_ok=True)
-        print(
-            "Optimizing "
-            + model_path
-            + " {:,} bytes".format(os.path.getsize(model_path))
-        )
-        t = time.time()
-        print(model_path)
-        face_enhancer = GFPGANer(
-            model_path=model_path,
-            upscale=4,  # args.outscale,
-            arch="clean",
-            channel_multiplier=2,
-            bg_upsampler=upsampler,
-        )
-        # upsampler.to(torch.device("cuda")) -- model init does it already
-        print("Load time: {:.2f} s".format(time.time() - t))
-        # print(upsampler.model.state_dict())
-        torch.save({"params": face_enhancer.gfpgan.state_dict()}, opt_path)
-        print("Optimized: {:,} bytes".format(os.path.getsize(opt_path)))
-        os.remove(model_path)
-
     print("Init GFPGan")
+    model_path = face_enhancers["GFPGAN"]["path"]
+    opt_path = re.sub(r".pth$", ".safetensors", face_enhancers["GFPGAN"]["path"])
+    GFPGANerToUse = GFPGANer2
+    if not os.path.exists(opt_path):
+        if OPTIMIZE:
+            print(
+                "Optimizing "
+                + model_path
+                + " {:,} bytes".format(os.path.getsize(model_path))
+            )
+            t = time.time()
+            print(model_path)
+            face_enhancer = GFPGANer(
+                model_path=model_path,
+                upscale=4,  # args.outscale,
+                arch="clean",
+                channel_multiplier=2,
+                bg_upsampler=upsampler,
+                device=device,
+            )
+            # upsampler.to(torch.device("cuda")) -- model init does it already
+            print("Load time: {:.2f} s".format(time.time() - t))
+            # print(upsampler.model.state_dict())
+            save_file(face_enhancer.gfpgan.state_dict(), opt_path)
+            print("Optimized: {:,} bytes".format(os.path.getsize(opt_path)))
+            os.remove(model_path)
+        else:
+            GFPGANerToUse = GFPGANer
+            opt_path = face_enhancers["GFPGAN"]["path"]
+
     t = time.time()
-    face_enhancer = GFPGANer(
+    face_enhancer = GFPGANerToUse(
         model_path=opt_path,
         upscale=4,  # args.outscale,
         arch="clean",
         channel_multiplier=2,
         bg_upsampler=upsampler,
+        device=device,
     )
     print("Load time: {:.2f} s".format(time.time() - t))
     print()
 
     # the models are all pretty small, just GFPGAN is about 5x the next
     # biggest, so let's optimize that.
-    model = face_enhancer
+    # model = face_enhancer
 
     send("init", "done")
 

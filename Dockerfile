@@ -32,6 +32,10 @@ RUN python3 download.py
 # Add your custom app code, init() and inference()
 ADD send.py .
 ADD app.py .
+
+ARG OPTIMIZE
+ENV SAFETENSORS_FAST_GPU=1
 RUN python3 app.py
+RUN ls -alFR weights gfpgan/weights
 
 CMD python3 -u server.py
